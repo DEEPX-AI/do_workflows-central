@@ -22,12 +22,12 @@ on:
         description: 'Delete source branch after merge'
         required: false
         default: false
-        type: boolean
+        type: string
       create_release:
         description: 'Create release after merge'
         required: false
         default: false
-        type: boolean
+        type: string
     secrets:
       token:
         description: 'Token for Read & Write'
