@@ -42,94 +42,94 @@ jobs:
       - sdk
     timeout-minutes: 20
     steps:
-    - name: Parse and Validate Target Repos List
-      id: parse
-      run: |
-        IFS=',' read -ra REPOS <<< "${{ inputs.target_repos }}"
-        repos_json="["; valid_repos=()
+      - name: Parse and Validate Target Repos List
+        id: parse
+        run: |
+          IFS=',' read -ra REPOS <<< "${{ inputs.target_repos }}"
+          repos_json="["; valid_repos=()
 
-        for repo in "${REPOS[@]}"; do
-          repo=$(echo "$repo" | xargs)
-          if [[ $repo =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]]; then
-            valid_repos+=("$repo")
-            [[ ${#valid_repos[@]} -gt 1 ]] && repos_json+=","
-            repos_json+="\"$repo\""
-          else
-            echo "⚠️ Invalid repository format: $repo"
+          for repo in "${REPOS[@]}"; do
+            repo=$(echo "$repo" | xargs)
+            if [[ $repo =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]]; then
+              valid_repos+=("$repo")
+              [[ ${#valid_repos[@]} -gt 1 ]] && repos_json+=","
+              repos_json+="\"$repo\""
+            else
+              echo "⚠️ Invalid repository format: $repo"
+            fi
+          done
+
+          repos_json+="]"
+
+          echo "repos=$repos_json" >> $GITHUB_ENV
+          echo "count=${#valid_repos[@]}" >> $GITHUB_ENV
+
+          echo "📋 Valid repositories (${#valid_repos[@]}):"
+          printf '%s\n' "${valid_repos[@]}"
+
+      - name: Exit if No Valid Repositories
+        if: env.count == '0'
+        run: |
+          echo "No valid target repositories provided. Exiting..."
+          exit 0
+
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.token }}
+
+      - name: Execute Squash Merge on target repos
+        id: merge
+        uses: DEEPX-AI/squash-merge-action@main
+        with:
+          token: ${{ secrets.token }}
+          target_repos: ${{ inputs.target_repos }}
+          source_branch: ${{ inputs.source_branch }}
+          target_branch: ${{ inputs.target_branch }}
+          delete_source_branch: ${{ inputs.delete_source_branch }}
+          create_release: ${{ inputs.create_release }}
+
+      - name: Generate Report
+        run: |
+          echo "## 🔀 Squash Merge Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Operation:** \`${{ inputs.source_branch }}\` → \`${{ inputs.target_branch }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Successfully Merged:** ${{ steps.merge.outputs.success_count }} repositories" >> $GITHUB_STEP_SUMMARY
+          echo "**Delete Source Branch:** ${{ inputs.delete_source_branch }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Create Release:** ${{ inputs.create_release }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Highest Bump Type:** ${{ steps.merge.outputs.highest_bump_type }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "${{ steps.merge.outputs.success_count }}" -gt "0" ]]; then
+            echo "### ✅ Successfully Merged Repositories" >> $GITHUB_STEP_SUMMARY
+            IFS=',' read -ra MERGED_REPOS <<< "${{ steps.merge.outputs.merged_repos }}"
+            for repo in "${MERGED_REPOS[@]}"; do
+              echo "- \`$repo\`" >> $GITHUB_STEP_SUMMARY
+            done
+            echo "" >> $GITHUB_STEP_SUMMARY
           fi
-        done
 
-        repos_json+="]"
+          if [[ -n "${{ steps.merge.outputs.failed_repos }}" ]]; then
+            echo "### ❌ Failed Repositories" >> $GITHUB_STEP_SUMMARY
+            IFS=',' read -ra FAILED_REPOS <<< "${{ steps.merge.outputs.failed_repos }}"
+            for repo in "${FAILED_REPOS[@]}"; do
+              echo "- \`$repo\`" >> $GITHUB_STEP_SUMMARY
+            done
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
 
-        echo "repos=$repos_json" >> $GITHUB_ENV
-        echo "count=${#valid_repos[@]}" >> $GITHUB_ENV
+          echo "### 📊 Summary" >> $GITHUB_STEP_SUMMARY
+          echo '```json' >> $GITHUB_STEP_SUMMARY
+          echo '${{ steps.merge.outputs.merge_summary }}' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
-        echo "📋 Valid repositories (${#valid_repos[@]}):"
-        printf '%s\n' "${valid_repos[@]}"
+      - name: Post-Merge Actions
+        if: steps.merge.outputs.success_count > 0
+        run: |
+          echo "🎉 Merge completed successfully!"
+          echo "Merged repositories: ${{ steps.merge.outputs.merged_repos }}"
 
-    - name: Exit if No Valid Repositories
-      if: env.count == '0'
-      run: |
-        echo "No valid target repositories provided. Exiting..."
-        exit 0
-
-    - uses: actions/checkout@v4
-      with:
-        token: ${{ secrets.token }}
-
-    - name: Execute Squash Merge on target repos
-      id: merge
-      uses: DEEPX-AI/squash-merge-action@main
-      with:
-        token: ${{ secrets.token }}
-        target_repos: ${{ inputs.target_repos }}
-        source_branch: ${{ inputs.source_branch }}
-        target_branch: ${{ inputs.target_branch }}
-        delete_source_branch: ${{ inputs.delete_source_branch }}
-        create_release: ${{ inputs.create_release }}
-
-    - name: Generate Report
-      run: |
-        echo "## 🔀 Squash Merge Results" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Operation:** \`${{ inputs.source_branch }}\` → \`${{ inputs.target_branch }}\`" >> $GITHUB_STEP_SUMMARY
-        echo "**Successfully Merged:** ${{ steps.merge.outputs.success_count }} repositories" >> $GITHUB_STEP_SUMMARY
-        echo "**Delete Source Branch:** ${{ inputs.delete_source_branch }}" >> $GITHUB_STEP_SUMMARY
-        echo "**Create Release:** ${{ inputs.create_release }}" >> $GITHUB_STEP_SUMMARY
-        echo "**Highest Bump Type:** ${{ steps.merge.outputs.highest_bump_type }}" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-
-        if [[ "${{ steps.merge.outputs.success_count }}" -gt "0" ]]; then
-          echo "### ✅ Successfully Merged Repositories" >> $GITHUB_STEP_SUMMARY
-          IFS=',' read -ra MERGED_REPOS <<< "${{ steps.merge.outputs.merged_repos }}"
-          for repo in "${MERGED_REPOS[@]}"; do
-            echo "- \`$repo\`" >> $GITHUB_STEP_SUMMARY
-          done
-          echo "" >> $GITHUB_STEP_SUMMARY
-        fi
-
-        if [[ -n "${{ steps.merge.outputs.failed_repos }}" ]]; then
-          echo "### ❌ Failed Repositories" >> $GITHUB_STEP_SUMMARY
-          IFS=',' read -ra FAILED_REPOS <<< "${{ steps.merge.outputs.failed_repos }}"
-          for repo in "${FAILED_REPOS[@]}"; do
-            echo "- \`$repo\`" >> $GITHUB_STEP_SUMMARY
-          done
-          echo "" >> $GITHUB_STEP_SUMMARY
-        fi
-
-        echo "### 📊 Summary" >> $GITHUB_STEP_SUMMARY
-        echo '```json' >> $GITHUB_STEP_SUMMARY
-        echo '${{ steps.merge.outputs.merge_summary }}' >> $GITHUB_STEP_SUMMARY
-        echo '```' >> $GITHUB_STEP_SUMMARY
-
-    - name: Post-Merge Actions
-      if: steps.merge.outputs.success_count > 0
-      run: |
-        echo "🎉 Merge completed successfully!"
-        echo "Merged repositories: ${{ steps.merge.outputs.merged_repos }}"
-
-    - name: Handle Failures
-      if: failure()
-      run: |
-        echo "❌ Squash merge operation failed!"
-        echo "Please check the logs above for detailed error information."
+      - name: Handle Failures
+        if: failure()
+        run: |
+          echo "❌ Squash merge operation failed!"
+          echo "Please check the logs above for detailed error information."

@@ -1,0 +1,54 @@
+name: Reusable update submodule workflow
+
+on:
+  workflow_call:
+    inputs:
+      source_child_repo:
+        description: "source repo that triggered this dispatch (ex. dx_rt)"
+        required: true
+        type: string
+      target_parent_repo:
+        description: "target repo to dispatch update submodule (ex. DEEPX-AI/dx-runtime)"
+        required: true
+        type: string
+      target_branch:
+        description: "target branch to dispatch"
+        required: true
+        type: string
+    secrets:
+      token:
+        description: "Token for Read & Write"
+        required: true
+
+permissions: write-all
+
+jobs:
+  dispatch-update-submodule:
+    runs-on:
+      - self-hosted
+      - sdk
+    timeout-minutes: 20
+    steps:
+      - name: Cleanup
+        run: |
+          sudo rm -rf ${{ github.workspace }}
+          mkdir -p ${{ github.workspace }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ secrets.token }}
+
+      - name: dispatch submodule update toward parent repo
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.token }}
+          repository: ${{ inputs.target_parent_repo }}
+          event-type: update-submodule
+          client-paylod: |
+            {
+              "name": "${{ inputs.source_child_repo }}",
+              "sha": "${{ github.sha }}",
+              "ref": "${{ github.ref_name }}"
+            }
