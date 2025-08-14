@@ -46,7 +46,7 @@ jobs:
           token: ${{ secrets.token }}
           repository: ${{ inputs.target_parent_repo }}
           event-type: update-submodule
-          client-paylod: |
+          client-payload: |
             {
               "name": "${{ inputs.source_child_repo }}",
               "sha": "${{ github.sha }}",
