@@ -56,7 +56,6 @@ jobs:
 
           git config user.name "dx-ci"
           git config user.email "dci@deepx.ai"
-          git config url."https://x-access-token:${TOKEN}@github.com/".insteadOf "git@github.com:"
 
           git checkout "$BRANCH"
           git pull origin "$BRANCH"
@@ -81,6 +80,9 @@ jobs:
           fi
 
           echo "Submodules to pin: ${SUB_PATHS[*]}"
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0="url.https://x-access-token:${TOKEN}@github.com/.insteadOf" \
+          GIT_CONFIG_VALUE_0="git@github.com:" \
           git submodule update --init -- "${SUB_PATHS[@]}"
 
           for sub in "${SUB_PATHS[@]}"; do
