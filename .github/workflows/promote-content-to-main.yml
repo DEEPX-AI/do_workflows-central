@@ -1,0 +1,148 @@
+name: Reusable promote content to main workflow
+
+on:
+  workflow_call:
+    inputs:
+      target_repos:
+        description: 'Target repositories to merge (comma-separated owner/repo)'
+        required: false
+        default: 'DEEPX-AI/dx_rt,DEEPX-AI/dx_app,DEEPX-AI/dx_stream,DEEPX-AI/dx_rt_npu_linux_driver,DEEPX-AI/dx_fw,DEEPX-AI/dx-compiler,DEEPX-AI/dx-modelzoo,DEEPX-AI/dx-runtime,DEEPX-AI/dx-all-suite'
+        type: string
+      source_branch:
+        description: 'Source branch to merge from'
+        required: false
+        default: 'staging'
+        type: string
+      target_branch:
+        description: 'Target branch to merge into'
+        required: false
+        default: 'main'
+        type: string
+      commit_message:
+        description: 'Commit message override (default: last staging commit subject)'
+        required: false
+        default: ''
+        type: string
+    secrets:
+      token:
+        description: 'Token for Read & Write'
+        required: true
+
+permissions: write-all
+
+jobs:
+  setup:
+    runs-on:
+      - self-hosted
+      - sdk
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.parse.outputs.matrix }}
+      count: ${{ steps.parse.outputs.count }}
+    steps:
+      - name: Parse and validate target repos
+        id: parse
+        run: |
+          IFS=',' read -ra REPOS <<< "${{ inputs.target_repos }}"
+          repos_json="["
+          count=0
+
+          for repo in "${REPOS[@]}"; do
+            repo=$(echo "$repo" | xargs)
+            if [[ $repo =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]]; then
+              [[ $count -gt 0 ]] && repos_json+=","
+              repos_json+="\"$repo\""
+              count=$((count + 1))
+              echo "Valid repository: $repo"
+            else
+              echo "::warning::Invalid repository format, skipping: $repo"
+            fi
+          done
+
+          repos_json+="]"
+          echo "matrix=$repos_json" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "Parsed $count valid repositories"
+
+  promote:
+    needs: setup
+    if: needs.setup.outputs.count != '0'
+    runs-on:
+      - self-hosted
+      - sdk
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        repo: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - name: Content-only squash merge (${{ matrix.repo }})
+        id: merge
+        env:
+          TOKEN: ${{ secrets.token }}
+          REPO_FULL: ${{ matrix.repo }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+          COMMIT_MESSAGE_INPUT: ${{ inputs.commit_message }}
+        run: |
+          set -euo pipefail
+
+          WORKDIR=$(mktemp -d)
+          trap 'rm -rf "$WORKDIR"' EXIT
+
+          echo "Cloning ${REPO_FULL}..."
+          git clone "https://x-access-token:${TOKEN}@github.com/${REPO_FULL}.git" "$WORKDIR"
+          cd "$WORKDIR"
+
+          git config user.name "dx-ci"
+          git config user.email "dci@deepx.ai"
+
+          git checkout "$TARGET_BRANCH"
+          git fetch origin "$SOURCE_BRANCH"
+
+          if git diff --quiet "$TARGET_BRANCH" "origin/${SOURCE_BRANCH}"; then
+            echo "::notice::No differences between ${TARGET_BRANCH} and origin/${SOURCE_BRANCH} for ${REPO_FULL}. Skipping."
+            echo "status=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ -n "$COMMIT_MESSAGE_INPUT" ]]; then
+            COMMIT_MSG="$COMMIT_MESSAGE_INPUT"
+          else
+            COMMIT_MSG=$(git log -1 --pretty=%s "origin/${SOURCE_BRANCH}")
+          fi
+
+          echo "Squash merging origin/${SOURCE_BRANCH} into ${TARGET_BRANCH} for ${REPO_FULL}..."
+          git merge --squash "origin/${SOURCE_BRANCH}" || true
+
+          if [[ -f .gitmodules ]]; then
+            mapfile -t SUB_PATHS < <(git config --file .gitmodules --get-regexp '^submodule\..*\.path$' | awk '{print $2}')
+            if [[ ${#SUB_PATHS[@]} -gt 0 ]]; then
+              echo "Restoring submodule pointers from ${TARGET_BRANCH} (excluding gitlink changes): ${SUB_PATHS[*]}"
+              git restore --source=HEAD --staged --worktree -- "${SUB_PATHS[@]}"
+            fi
+          fi
+
+          if git ls-files -u | grep -q .; then
+            echo "::error::Non-submodule conflict detected in ${REPO_FULL}. Manual resolution required."
+            git diff --name-only --diff-filter=U || true
+            exit 1
+          fi
+
+          if git diff --staged --quiet; then
+            echo "::notice::No content changes to merge for ${REPO_FULL} (submodule-only diff). Skipping."
+            echo "status=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -m "$COMMIT_MSG"
+          git push origin "$TARGET_BRANCH"
+          echo "status=merged" >> "$GITHUB_OUTPUT"
+          echo "Merged ${REPO_FULL}: ${SOURCE_BRANCH} -> ${TARGET_BRANCH}"
+
+      - name: Write job summary
+        if: always()
+        run: |
+          echo "## ${{ matrix.repo }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Operation:** \`${{ inputs.source_branch }}\` → \`${{ inputs.target_branch }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Result:** ${{ steps.merge.outputs.status || 'failed' }}" >> "$GITHUB_STEP_SUMMARY"

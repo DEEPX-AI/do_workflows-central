@@ -1,0 +1,115 @@
+name: Reusable pin submodules to main workflow
+
+on:
+  workflow_call:
+    inputs:
+      target_repo:
+        description: 'Parent repository (owner/repo) whose submodules will be pinned'
+        required: true
+        type: string
+      submodule_names:
+        description: 'Comma-separated submodule paths (default: all paths in .gitmodules)'
+        required: false
+        default: ''
+        type: string
+      branch:
+        description: 'Branch to update submodule pointers on'
+        required: false
+        default: 'main'
+        type: string
+      commit_message:
+        description: 'Commit message for submodule pointer update'
+        required: false
+        default: 'ci: update submodule pointers to main'
+        type: string
+    secrets:
+      token:
+        description: 'Token for Read & Write'
+        required: true
+
+permissions: write-all
+
+jobs:
+  pin:
+    runs-on:
+      - self-hosted
+      - sdk
+    timeout-minutes: 20
+    steps:
+      - name: Pin submodule pointers on ${{ inputs.target_repo }}
+        id: pin
+        env:
+          TOKEN: ${{ secrets.token }}
+          TARGET_REPO: ${{ inputs.target_repo }}
+          SUBMODULE_NAMES: ${{ inputs.submodule_names }}
+          BRANCH: ${{ inputs.branch }}
+          COMMIT_MSG: ${{ inputs.commit_message }}
+        run: |
+          set -euo pipefail
+
+          WORKDIR=$(mktemp -d)
+          trap 'rm -rf "$WORKDIR"' EXIT
+
+          echo "Cloning ${TARGET_REPO}..."
+          git clone "https://x-access-token:${TOKEN}@github.com/${TARGET_REPO}.git" "$WORKDIR"
+          cd "$WORKDIR"
+
+          git config user.name "dx-ci"
+          git config user.email "dci@deepx.ai"
+
+          git checkout "$BRANCH"
+          git pull origin "$BRANCH"
+
+          if [[ ! -f .gitmodules ]]; then
+            echo "::error::No .gitmodules found in ${TARGET_REPO}. Nothing to pin."
+            exit 1
+          fi
+
+          if [[ -n "$SUBMODULE_NAMES" ]]; then
+            IFS=',' read -ra SUB_PATHS <<< "$SUBMODULE_NAMES"
+            for i in "${!SUB_PATHS[@]}"; do
+              SUB_PATHS[$i]=$(echo "${SUB_PATHS[$i]}" | xargs)
+            done
+          else
+            mapfile -t SUB_PATHS < <(git config --file .gitmodules --get-regexp '^submodule\..*\.path$' | awk '{print $2}')
+          fi
+
+          if [[ ${#SUB_PATHS[@]} -eq 0 ]]; then
+            echo "::error::No submodule paths resolved for ${TARGET_REPO}."
+            exit 1
+          fi
+
+          echo "Submodules to pin: ${SUB_PATHS[*]}"
+          git submodule update --init -- "${SUB_PATHS[@]}"
+
+          for sub in "${SUB_PATHS[@]}"; do
+            if [[ ! -d "$sub" ]]; then
+              echo "::error::Submodule path not found: $sub"
+              exit 1
+            fi
+            echo "Pinning $sub to origin/main..."
+            (
+              cd "$sub"
+              git fetch origin
+              git checkout origin/main
+            )
+            git add "$sub"
+          done
+
+          if git diff --staged --quiet; then
+            echo "::notice::No submodule pointer changes for ${TARGET_REPO} on ${BRANCH}."
+            echo "status=unchanged" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -m "$COMMIT_MSG"
+          git push origin "$BRANCH"
+          echo "status=updated" >> "$GITHUB_OUTPUT"
+          echo "Updated submodule pointers on ${TARGET_REPO}:${BRANCH}"
+
+      - name: Write job summary
+        if: always()
+        run: |
+          echo "## Pin submodules: ${{ inputs.target_repo }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Submodules:** \`${{ inputs.submodule_names || 'all from .gitmodules' }}\` on \`${{ inputs.branch }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Result:** ${{ steps.pin.outputs.status || 'failed' }}" >> "$GITHUB_STEP_SUMMARY"
