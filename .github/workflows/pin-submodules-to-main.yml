@@ -48,7 +48,19 @@ jobs:
           set -euo pipefail
 
           WORKDIR=$(mktemp -d)
-          trap 'rm -rf "$WORKDIR"' EXIT
+          SSH_INSTEADOF_KEY="url.https://x-access-token:${TOKEN}@github.com/.insteadOf"
+          cleanup() {
+            git config --global --unset "$SSH_INSTEADOF_KEY" "git@github.com:" 2>/dev/null || true
+            rm -rf "$WORKDIR"
+          }
+          trap cleanup EXIT
+
+          # Submodule URLs in this test environment use SSH (git@github.com:...),
+          # but the runner only has token-based HTTPS access. Rewriting SSH -> HTTPS
+          # globally (rather than per-command) ensures every git operation for the
+          # rest of this job -- the initial submodule clone AND the later per-submodule
+          # fetch/checkout -- consistently uses token auth instead of SSH.
+          git config --global "$SSH_INSTEADOF_KEY" "git@github.com:"
 
           echo "Cloning ${TARGET_REPO}..."
           git clone "https://x-access-token:${TOKEN}@github.com/${TARGET_REPO}.git" "$WORKDIR"
@@ -80,9 +92,6 @@ jobs:
           fi
 
           echo "Submodules to pin: ${SUB_PATHS[*]}"
-          GIT_CONFIG_COUNT=1 \
-          GIT_CONFIG_KEY_0="url.https://x-access-token:${TOKEN}@github.com/.insteadOf" \
-          GIT_CONFIG_VALUE_0="git@github.com:" \
           git submodule update --init -- "${SUB_PATHS[@]}"
 
           for sub in "${SUB_PATHS[@]}"; do
