@@ -1,0 +1,122 @@
+name: Reusable create pre-release branch workflow
+
+on:
+  workflow_call:
+    inputs:
+      target_repos:
+        description: 'Target repositories to create the branch in (comma-separated owner/repo)'
+        required: false
+        default: 'DEEPX-AI/dx_rt,DEEPX-AI/dx_app,DEEPX-AI/dx_stream,DEEPX-AI/dx_rt_npu_linux_driver,DEEPX-AI/dx_fw,DEEPX-AI/dx-compiler,DEEPX-AI/dx-modelzoo,DEEPX-AI/dx-runtime,DEEPX-AI/dx-all-suite'
+        type: string
+      pre_release_branch:
+        description: 'Pre-release branch name to create (e.g. v2.5.0-pre.20260821)'
+        required: true
+        type: string
+      base_branch:
+        description: 'Branch to create the pre-release branch from'
+        required: false
+        default: 'main'
+        type: string
+    secrets:
+      token:
+        description: 'Token for Read & Write'
+        required: true
+
+permissions: write-all
+
+jobs:
+  setup:
+    runs-on:
+      - self-hosted
+      - sdk
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.parse.outputs.matrix }}
+      count: ${{ steps.parse.outputs.count }}
+    steps:
+      - name: Validate branch name
+        env:
+          PRE_RELEASE_BRANCH: ${{ inputs.pre_release_branch }}
+        run: |
+          if [[ ! "$PRE_RELEASE_BRANCH" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
+            echo "::error::Invalid pre-release branch name: $PRE_RELEASE_BRANCH"
+            exit 1
+          fi
+
+      - name: Parse and validate target repos
+        id: parse
+        run: |
+          IFS=',' read -ra REPOS <<< "${{ inputs.target_repos }}"
+          repos_json="["
+          count=0
+
+          for repo in "${REPOS[@]}"; do
+            repo=$(echo "$repo" | xargs)
+            if [[ $repo =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]]; then
+              [[ $count -gt 0 ]] && repos_json+=","
+              repos_json+="\"$repo\""
+              count=$((count + 1))
+              echo "Valid repository: $repo"
+            else
+              echo "::warning::Invalid repository format, skipping: $repo"
+            fi
+          done
+
+          repos_json+="]"
+          echo "matrix=$repos_json" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "Parsed $count valid repositories"
+
+  create:
+    needs: setup
+    if: needs.setup.outputs.count != '0'
+    runs-on:
+      - self-hosted
+      - sdk
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        repo: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - name: Create pre-release branch (${{ matrix.repo }})
+        id: create
+        env:
+          TOKEN: ${{ secrets.token }}
+          REPO_FULL: ${{ matrix.repo }}
+          PRE_RELEASE_BRANCH: ${{ inputs.pre_release_branch }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+        run: |
+          set -euo pipefail
+
+          REMOTE_URL="https://x-access-token:${TOKEN}@github.com/${REPO_FULL}.git"
+
+          if git ls-remote --exit-code --heads "$REMOTE_URL" "$PRE_RELEASE_BRANCH" >/dev/null; then
+            echo "::notice::Branch ${PRE_RELEASE_BRANCH} already exists in ${REPO_FULL}. Skipping."
+            echo "status=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BASE_SHA=$(git ls-remote --heads "$REMOTE_URL" "$BASE_BRANCH" | awk '{print $1}')
+          if [[ -z "$BASE_SHA" ]]; then
+            echo "::error::Base branch ${BASE_BRANCH} not found in ${REPO_FULL}."
+            exit 1
+          fi
+
+          WORKDIR=$(mktemp -d)
+          trap 'rm -rf "$WORKDIR"' EXIT
+
+          echo "Creating ${PRE_RELEASE_BRANCH} from ${BASE_BRANCH} (${BASE_SHA}) in ${REPO_FULL}..."
+          git clone --branch "$BASE_BRANCH" --single-branch "$REMOTE_URL" "$WORKDIR"
+          cd "$WORKDIR"
+          git push origin "${BASE_SHA}:refs/heads/${PRE_RELEASE_BRANCH}"
+
+          echo "status=created" >> "$GITHUB_OUTPUT"
+          echo "Created ${REPO_FULL}:${PRE_RELEASE_BRANCH} at ${BASE_SHA}"
+
+      - name: Write job summary
+        if: always()
+        run: |
+          echo "## ${{ matrix.repo }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Operation:** create \`${{ inputs.pre_release_branch }}\` from \`${{ inputs.base_branch }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Result:** ${{ steps.create.outputs.status || 'failed' }}" >> "$GITHUB_STEP_SUMMARY"

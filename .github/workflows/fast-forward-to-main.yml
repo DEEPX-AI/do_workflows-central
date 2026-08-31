@@ -1,0 +1,134 @@
+name: Reusable fast-forward to main workflow
+
+on:
+  workflow_call:
+    inputs:
+      target_repos:
+        description: 'Target repositories to fast-forward (comma-separated owner/repo)'
+        required: false
+        default: 'DEEPX-AI/dx_rt,DEEPX-AI/dx_app,DEEPX-AI/dx_stream,DEEPX-AI/dx_rt_npu_linux_driver,DEEPX-AI/dx_fw,DEEPX-AI/dx-compiler,DEEPX-AI/dx-modelzoo,DEEPX-AI/dx-runtime,DEEPX-AI/dx-all-suite'
+        type: string
+      source_branch:
+        description: 'Pre-release branch to promote (e.g. v2.5.0-pre.20260821)'
+        required: true
+        type: string
+      target_branch:
+        description: 'Branch to fast-forward'
+        required: false
+        default: 'main'
+        type: string
+    secrets:
+      token:
+        description: 'Token for Read & Write'
+        required: true
+
+permissions: write-all
+
+jobs:
+  setup:
+    runs-on:
+      - self-hosted
+      - sdk
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.parse.outputs.matrix }}
+      count: ${{ steps.parse.outputs.count }}
+    steps:
+      - name: Validate branch names
+        env:
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+        run: |
+          for b in "$SOURCE_BRANCH" "$TARGET_BRANCH"; do
+            if [[ ! "$b" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
+              echo "::error::Invalid branch name: $b"
+              exit 1
+            fi
+          done
+
+      - name: Parse and validate target repos
+        id: parse
+        run: |
+          IFS=',' read -ra REPOS <<< "${{ inputs.target_repos }}"
+          repos_json="["
+          count=0
+
+          for repo in "${REPOS[@]}"; do
+            repo=$(echo "$repo" | xargs)
+            if [[ $repo =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]]; then
+              [[ $count -gt 0 ]] && repos_json+=","
+              repos_json+="\"$repo\""
+              count=$((count + 1))
+              echo "Valid repository: $repo"
+            else
+              echo "::warning::Invalid repository format, skipping: $repo"
+            fi
+          done
+
+          repos_json+="]"
+          echo "matrix=$repos_json" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "Parsed $count valid repositories"
+
+  fast_forward:
+    needs: setup
+    if: needs.setup.outputs.count != '0'
+    runs-on:
+      - self-hosted
+      - sdk
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        repo: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - name: Fast-forward ${{ inputs.target_branch }} (${{ matrix.repo }})
+        id: ff
+        env:
+          TOKEN: ${{ secrets.token }}
+          REPO_FULL: ${{ matrix.repo }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+        run: |
+          set -euo pipefail
+
+          WORKDIR=$(mktemp -d)
+          trap 'rm -rf "$WORKDIR"' EXIT
+
+          echo "Cloning ${REPO_FULL}..."
+          git clone "https://x-access-token:${TOKEN}@github.com/${REPO_FULL}.git" "$WORKDIR"
+          cd "$WORKDIR"
+
+          if ! git rev-parse --verify --quiet "origin/${SOURCE_BRANCH}" >/dev/null; then
+            echo "::error::Source branch ${SOURCE_BRANCH} not found in ${REPO_FULL}."
+            exit 1
+          fi
+
+          SOURCE_SHA=$(git rev-parse "origin/${SOURCE_BRANCH}")
+          TARGET_SHA=$(git rev-parse "origin/${TARGET_BRANCH}")
+
+          if [[ "$SOURCE_SHA" == "$TARGET_SHA" ]]; then
+            echo "::notice::${TARGET_BRANCH} already at ${SOURCE_SHA} for ${REPO_FULL}. Skipping."
+            echo "status=up-to-date" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! git merge-base --is-ancestor "$TARGET_SHA" "$SOURCE_SHA"; then
+            echo "::error::${TARGET_BRANCH} (${TARGET_SHA}) has diverged from ${SOURCE_BRANCH} in ${REPO_FULL}. Fast-forward impossible — ${TARGET_BRANCH} was modified during the freeze. Fallback: re-run the promote-content + pin workflows with source_branch=${SOURCE_BRANCH}, target_branch=${TARGET_BRANCH}."
+            echo "status=diverged" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "Fast-forwarding ${TARGET_BRANCH}: ${TARGET_SHA} -> ${SOURCE_SHA} in ${REPO_FULL}..."
+          # Plain push (no --force): the server also rejects any non-fast-forward update.
+          git push origin "${SOURCE_SHA}:refs/heads/${TARGET_BRANCH}"
+
+          echo "status=fast-forwarded" >> "$GITHUB_OUTPUT"
+          echo "Fast-forwarded ${REPO_FULL}:${TARGET_BRANCH} to ${SOURCE_SHA}"
+
+      - name: Write job summary
+        if: always()
+        run: |
+          echo "## ${{ matrix.repo }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Operation:** fast-forward \`${{ inputs.target_branch }}\` to \`${{ inputs.source_branch }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Result:** ${{ steps.ff.outputs.status || 'failed' }}" >> "$GITHUB_STEP_SUMMARY"
